@@ -24,6 +24,11 @@ import (
 
 const RootDomain = "asset.unko.in"
 
+const (
+	AccessLogPath = "./log"
+	RootDataPath  = "data"
+)
+
 type Unixtime time.Time
 
 func (ts *Unixtime) UnmarshalJSON(data []byte) error {
@@ -104,6 +109,13 @@ type App struct {
 }
 
 var log *zap.SugaredLogger
+var gzipContentTypeList = []string{
+	"text/html",
+	"text/css",
+	"text/javascript",
+	"text/plain",
+	"application/json",
+}
 
 func init() {
 	//logger, err := zap.NewDevelopment()
