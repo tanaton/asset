@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -26,6 +27,7 @@ const RootDomain = "asset.unko.in"
 
 const (
 	AccessLogPath = "./log"
+	WwwPath       = "./www"
 	RootDataPath  = "data"
 )
 
@@ -99,6 +101,31 @@ type Finance struct {
 	} `json:"chart"`
 }
 
+type StoreItem struct {
+	Date   Unixtime `json:"date"`
+	Open   float64  `json:"open"`
+	High   float64  `json:"high"`
+	Volume float64  `json:"volume"`
+	Low    float64  `json:"low"`
+	Close  float64  `json:"close"`
+}
+
+type Store struct {
+	Items []StoreItem `json:"data"`
+}
+
+const (
+	assetTypeTosho = iota // 東証
+	assetTypeFund         // 投資信託
+	assetTypeEnd
+)
+
+type asset struct {
+	name string
+	typ  uint
+	code string
+}
+
 type Srv struct {
 	s *http.Server
 	f func(s *http.Server) error
@@ -115,6 +142,19 @@ var gzipContentTypeList = []string{
 	"text/javascript",
 	"text/plain",
 	"application/json",
+}
+
+var myassets = []asset{
+	{
+		name: "楽天",
+		typ:  assetTypeTosho,
+		code: "4755.T",
+	},
+	{
+		name: "ENEOSホールディングス",
+		typ:  assetTypeTosho,
+		code: "5020.T",
+	},
 }
 
 func init() {
@@ -146,7 +186,7 @@ func (app *App) Run(ctx context.Context) error {
 
 	// URL設定
 	http.Handle("/api/unko.in/1/monitor", &GetMonitoringHandler{ch: monich})
-	http.Handle("/", http.FileServer(http.Dir("./public_html")))
+	http.Handle("/", http.FileServer(http.Dir(WwwPath)))
 
 	ghfunc, err := gziphandler.GzipHandlerWithOpts(gziphandler.CompressionLevel(gzip.BestSpeed), gziphandler.ContentTypes(gzipContentTypeList))
 	if err != nil {
@@ -158,11 +198,11 @@ func (app *App) Run(ctx context.Context) error {
 
 	// サーバ情報
 	sl := []Srv{
-		Srv{
+		{
 			s: &http.Server{Addr: ":8080", Handler: h},
 			f: func(s *http.Server) error { return s.ListenAndServe() },
 		},
-		Srv{
+		{
 			s: &http.Server{Handler: h},
 			f: func(s *http.Server) error { return s.Serve(autocert.NewListener(RootDomain)) },
 		},
@@ -252,43 +292,91 @@ func (app *App) startExitManageProc(ctx context.Context) (context.Context, chan<
 
 func (app *App) getDataProc(ctx context.Context) {
 	defer app.wg.Done()
-	tc := time.NewTicker(time.Minute * 10)
+	tc := time.NewTicker(10 * time.Minute)
 	defer tc.Stop()
+	i := 0
 	for {
 		select {
 		case <-ctx.Done():
 			log.Infow("getDataProc終了")
 			return
 		case <-tc.C:
-			func() {
-				tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				req, err := http.NewRequestWithContext(tctx, "GET", "https://query2.finance.yahoo.com/v7/finance/chart/4755.T?range=10y&interval=1d", nil)
-				if err != nil {
-					log.Warnw("エラー", "err", err)
-					return
-				}
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					log.Warnw("エラー", "err", err)
-					return
-				}
-				defer resp.Body.Close()
-				var fin Finance
-				dec := json.NewDecoder(resp.Body)
-				if err := dec.Decode(&fin); err != nil {
-					log.Warnw("エラー", "err", err)
-					return
-				}
-				b, err := json.MarshalIndent(&fin, "", "\t")
-				if err != nil {
-					log.Warnw("エラー", "err", err)
-					return
-				}
-				fmt.Println(string(b))
-			}()
+			as := myassets[i]
+			i = (i + 1) % len(myassets)
+			getPrice(ctx, as)
 		}
 	}
+}
+
+func getPrice(ctx context.Context, as asset) {
+	tctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	switch as.typ {
+	case assetTypeTosho:
+		getPriceTosho(tctx, as)
+	case assetTypeFund:
+	default:
+	}
+}
+
+func getPriceTosho(ctx context.Context, as asset) {
+	u := fmt.Sprintf("https://query2.finance.yahoo.com/v7/finance/chart/%s?range=10y&interval=1d", as.code)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		log.Warnw("エラー", "err", err)
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Warnw("エラー", "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	var fin Finance
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(&fin); err != nil {
+		log.Warnw("エラー", "err", err)
+		return
+	}
+
+	if len(fin.Chart.Result) <= 0 {
+		return
+	}
+	res := fin.Chart.Result[0]
+	if len(res.Indicators.Quote) <= 0 {
+		return
+	}
+	if len(res.Timestamp) != len(res.Indicators.Quote[0].Open) {
+		return
+	}
+	q := res.Indicators.Quote[0]
+	s := Store{
+		Items: make([]StoreItem, 0, len(res.Timestamp)),
+	}
+	for i, date := range res.Timestamp {
+		s.Items = append(s.Items, StoreItem{
+			Date:   date,
+			Open:   q.Open[i],
+			High:   q.High[i],
+			Volume: q.Volume[i],
+			Low:    q.Low[i],
+			Close:  q.Close[i],
+		})
+	}
+
+	fp, err := os.Create(as.code + ".json")
+	if err != nil {
+		log.Warnw("エラー", "err", err)
+		return
+	}
+	defer fp.Close()
+	w := bufio.NewWriterSize(fp, 128*1024)
+	enc := json.NewEncoder(w)
+	if err := enc.Encode(&s); err != nil {
+		log.Warnw("エラー", "err", err)
+		return
+	}
+	w.Flush()
 }
 
 // サーバお手軽監視用
