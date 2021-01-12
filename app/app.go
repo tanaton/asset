@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/NYTimes/gziphandler"
+	"github.com/natefinch/lumberjack"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/crypto/acme/autocert"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const RootDomain = "asset.unko.in"
