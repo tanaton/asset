@@ -1,11 +1,9 @@
 package app
 
 import (
-	"bufio"
 	"compress/gzip"
 	"context"
-	"encoding/json"
-	"fmt"
+	"errors"
 	"math/rand"
 	"net/http"
 	"os"
@@ -28,7 +26,7 @@ const RootDomain = "asset.unko.in"
 const (
 	AccessLogPath = "./log"
 	WwwPath       = "./www"
-	RootDataPath  = "data"
+	RootDataPath  = "./data"
 )
 
 type Unixtime time.Time
@@ -52,66 +50,31 @@ func (ts Unixtime) MarshalBinary() ([]byte, error) {
 	return time.Time(ts).MarshalBinary()
 }
 
-type TradingPeriod struct {
-	Timezone  string   `json:"timezone"`
-	Start     Unixtime `json:"start"`
-	End       Unixtime `json:"end"`
-	Gmtoffset int64    `json:"gmtoffset"`
+type Indicator struct {
+	Date     Unixtime `json:"date"`
+	Open     float64  `json:"open"`
+	High     float64  `json:"high"`
+	Volume   float64  `json:"volume"`
+	Low      float64  `json:"low"`
+	Close    float64  `json:"close"`
+	Adjclose float64  `json:"adjclose"`
 }
 
-type Finance struct {
-	Chart struct {
-		Result []struct {
-			Meta struct {
-				Currency             string   `json:"currency"`
-				Symbol               string   `json:"symbol"`
-				ExchangeName         string   `json:"exchangeName"`
-				InstrumentType       string   `json:"instrumentType"`
-				FirstTradeDate       Unixtime `json:"firstTradeDate"`
-				RegularMarketTime    Unixtime `json:"regularMarketTime"`
-				Gmtoffset            int64    `json:"gmtoffset"`
-				Timezone             string   `json:"timezone"`
-				ExchangeTimezoneName string   `json:"exchangeTimezoneName"`
-				RegularMarketPrice   float64  `json:"regularMarketPrice"`
-				ChartPreviousClose   float64  `json:"chartPreviousClose"`
-				PriceHint            int64    `json:"priceHint"`
-				CurrentTradingPeriod struct {
-					Pre     TradingPeriod `json:"pre"`
-					Regular TradingPeriod `json:"regular"`
-					Post    TradingPeriod `json:"post"`
-				} `json:"currentTradingPeriod"`
-				DataGranularity string   `json:"dataGranularity"`
-				Range           string   `json:"range"`
-				ValidRanges     []string `json:"validRanges"`
-			} `json:"meta"`
-			Timestamp  []Unixtime `json:"timestamp"`
-			Indicators struct {
-				Quote []struct {
-					Open   []float64 `json:"open"`
-					High   []float64 `json:"high"`
-					Volume []float64 `json:"volume"`
-					Low    []float64 `json:"low"`
-					Close  []float64 `json:"close"`
-				} `json:"quote"`
-				Adjclose []struct {
-					Adjclose []float64 `json:"adjclose"`
-				} `json:"adjclose"`
-			} `json:"indicators"`
-		} `json:"result"`
-	} `json:"chart"`
-}
-
-type StoreItem struct {
-	Date   Unixtime `json:"date"`
-	Open   float64  `json:"open"`
-	High   float64  `json:"high"`
-	Volume float64  `json:"volume"`
-	Low    float64  `json:"low"`
-	Close  float64  `json:"close"`
+type Meta struct {
+	Currency          string   `json:"currency"`
+	Symbol            string   `json:"symbol"`
+	ExchangeName      string   `json:"exchangeName"`
+	InstrumentType    string   `json:"instrumentType"`
+	FirstTradeDate    Unixtime `json:"firstTradeDate"`
+	RegularMarketTime Unixtime `json:"regularMarketTime"`
 }
 
 type Store struct {
-	Items []StoreItem `json:"data"`
+	Name       string      `json:"name"`
+	Code       string      `json:"code"`
+	Type       uint        `json:"type"`
+	Meta       Meta        `json:"meta"`
+	Indicators []Indicator `json:"indicators"`
 }
 
 const (
@@ -304,6 +267,7 @@ func (app *App) getDataProc(ctx context.Context) {
 			as := myassets[i]
 			i = (i + 1) % len(myassets)
 			getPrice(ctx, as)
+			log.Infow("価格情報取得", "name", as.name, "code", as.code)
 		}
 	}
 }
@@ -313,70 +277,11 @@ func getPrice(ctx context.Context, as asset) {
 	defer cancel()
 	switch as.typ {
 	case assetTypeTosho:
-		getPriceTosho(tctx, as)
+		getPriceJpx(tctx, as)
 	case assetTypeFund:
+		// 未実装
 	default:
 	}
-}
-
-func getPriceTosho(ctx context.Context, as asset) {
-	u := fmt.Sprintf("https://query2.finance.yahoo.com/v7/finance/chart/%s?range=10y&interval=1d", as.code)
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		log.Warnw("エラー", "err", err)
-		return
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Warnw("エラー", "err", err)
-		return
-	}
-	defer resp.Body.Close()
-	var fin Finance
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&fin); err != nil {
-		log.Warnw("エラー", "err", err)
-		return
-	}
-
-	if len(fin.Chart.Result) <= 0 {
-		return
-	}
-	res := fin.Chart.Result[0]
-	if len(res.Indicators.Quote) <= 0 {
-		return
-	}
-	if len(res.Timestamp) != len(res.Indicators.Quote[0].Open) {
-		return
-	}
-	q := res.Indicators.Quote[0]
-	s := Store{
-		Items: make([]StoreItem, 0, len(res.Timestamp)),
-	}
-	for i, date := range res.Timestamp {
-		s.Items = append(s.Items, StoreItem{
-			Date:   date,
-			Open:   q.Open[i],
-			High:   q.High[i],
-			Volume: q.Volume[i],
-			Low:    q.Low[i],
-			Close:  q.Close[i],
-		})
-	}
-
-	fp, err := os.Create(as.code + ".json")
-	if err != nil {
-		log.Warnw("エラー", "err", err)
-		return
-	}
-	defer fp.Close()
-	w := bufio.NewWriterSize(fp, 128*1024)
-	enc := json.NewEncoder(w)
-	if err := enc.Encode(&s); err != nil {
-		log.Warnw("エラー", "err", err)
-		return
-	}
-	w.Flush()
 }
 
 // サーバお手軽監視用
@@ -432,4 +337,19 @@ func (app *App) serverMonitoringProc(ctx context.Context, rich <-chan ResponseIn
 			res = ResultMonitor{}
 		}
 	}
+}
+
+func makedir(p string) error {
+	st, err := os.Stat(p)
+	if err == nil {
+		if st.IsDir() == false {
+			return errors.New("作るフォルダと同じ名前のファイルがありました。")
+		}
+	} else {
+		mkdirerr := os.MkdirAll(p, 0666)
+		if mkdirerr != nil {
+			return mkdirerr
+		}
+	}
+	return nil
 }
