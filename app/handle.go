@@ -1,15 +1,23 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"time"
 )
 
 type GetMonitoringHandler struct {
 	ch <-chan ResultMonitor
+}
+
+type GetIndicatorHandler struct {
+	path   string
+	data   []byte
+	update <-chan bool
 }
 
 func (h *GetMonitoringHandler) getResultMonitor(ctx context.Context) (ResultMonitor, error) {
@@ -36,4 +44,26 @@ func (h *GetMonitoringHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	} else {
 		http.Error(w, "データ取得に失敗しました。", http.StatusInternalServerError)
 	}
+}
+
+func (h *GetIndicatorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	select {
+	case <-h.update:
+		fp, err := os.Open(h.path)
+		if err != nil {
+			http.Error(w, "データ取得に失敗しました。", http.StatusInternalServerError)
+			return
+		}
+		defer fp.Close()
+		buf := bytes.Buffer{}
+		_, rerr := buf.ReadFrom(fp)
+		if rerr != nil {
+			http.Error(w, "データ取得に失敗しました。", http.StatusInternalServerError)
+			return
+		}
+		h.data = buf.Bytes()
+	default:
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Write(h.data)
 }

@@ -67,6 +67,8 @@ type Meta struct {
 	InstrumentType    string   `json:"instrumentType"`
 	FirstTradeDate    Unixtime `json:"firstTradeDate"`
 	RegularMarketTime Unixtime `json:"regularMarketTime"`
+	DataGranularity   string   `json:"dataGranularity"`
+	Range             string   `json:"range"`
 }
 
 type Store struct {
@@ -277,7 +279,7 @@ func getPrice(ctx context.Context, as asset) {
 	defer cancel()
 	switch as.typ {
 	case assetTypeTosho:
-		getPriceJpx(tctx, as)
+		storePriceJpx(tctx, as)
 	case assetTypeFund:
 		// 未実装
 	default:
@@ -352,4 +354,8 @@ func makedir(p string) error {
 		}
 	}
 	return nil
+}
+
+func createAssetFolderPath(as asset) string {
+	return filepath.Join(RootDataPath, as.code)
 }

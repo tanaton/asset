@@ -2,15 +2,13 @@ package app
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 type TradingPeriod struct {
@@ -67,6 +65,10 @@ func getHiashiURL(code string) string {
 	return fmt.Sprintf("https://query2.finance.yahoo.com/v7/finance/chart/%s?range=10y&interval=1d", code)
 }
 
+func getShuashiURL(code string) string {
+	return fmt.Sprintf("https://query2.finance.yahoo.com/v7/finance/chart/%s?range=10y&interval=1w", code)
+}
+
 func getTukiashiURL(code string) string {
 	return fmt.Sprintf("https://query2.finance.yahoo.com/v7/finance/chart/%s?range=10y&interval=1mo", code)
 }
@@ -82,34 +84,23 @@ func getJpxIndicator(ctx context.Context, u string) (*Finance, error) {
 	}
 	defer resp.Body.Close()
 	var fin Finance
-	{
-		dec := json.NewDecoder(resp.Body)
-		if err := dec.Decode(&fin); err != nil {
-			return nil, err
-		}
+	dec := json.NewDecoder(resp.Body)
+	if err := dec.Decode(&fin); err != nil {
+		return nil, err
 	}
 	return &fin, nil
 }
 
-func getPriceJpx(ctx context.Context, as asset) {
-	u := getHiashiURL(as.code)
-	fin, err := getJpxIndicator(ctx, u)
-	if err != nil {
-		log.Warnw("通信に失敗しました。", "url", u, "error", err)
-		return
-	}
+func financeToStore(as asset, fin *Finance) (*Store, error) {
 	if len(fin.Chart.Result) <= 0 {
-		log.Warnw("取得したデータが不明なフォーマットでした。len(fin.Chart.Result) <= 0", "url", u)
-		return
+		return nil, errors.New("取得したデータが不明なフォーマットでした。len(fin.Chart.Result) <= 0")
 	}
 	res := fin.Chart.Result[0]
 	if len(res.Indicators.Quote) <= 0 {
-		log.Warnw("取得したデータが不明なフォーマットでした。len(res.Indicators.Quote) <= 0", "url", u)
-		return
+		return nil, errors.New("取得したデータが不明なフォーマットでした。len(res.Indicators.Quote) <= 0")
 	}
 	if len(res.Timestamp) != len(res.Indicators.Quote[0].Open) {
-		log.Warnw("データの時間数とデータの数が異なります。", "url", u)
-		return
+		return nil, errors.New("データの時間数とデータの数が異なります。")
 	}
 
 	q := res.Indicators.Quote[0]
@@ -124,6 +115,8 @@ func getPriceJpx(ctx context.Context, as asset) {
 			InstrumentType:    res.Meta.InstrumentType,
 			FirstTradeDate:    res.Meta.FirstTradeDate,
 			RegularMarketTime: res.Meta.RegularMarketTime,
+			DataGranularity:   res.Meta.DataGranularity,
+			Range:             res.Meta.Range,
 		},
 		Indicators: make([]Indicator, 0, len(res.Timestamp)),
 	}
@@ -137,22 +130,42 @@ func getPriceJpx(ctx context.Context, as asset) {
 			Close:  q.Close[i],
 		})
 	}
+	return &s, nil
+}
 
-	dir := filepath.Join(RootDataPath, as.code)
+func createIndicatorPath(as asset) (string, error) {
+	dir := filepath.Join(createAssetFolderPath(as), "indicator")
 	if err := makedir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func storePriceJpx(ctx context.Context, as asset) {
+	u := getHiashiURL(as.code)
+	fin, err := getJpxIndicator(ctx, u)
+	if err != nil {
+		log.Warnw("通信に失敗しました。", "url", u, "error", err)
+		return
+	}
+	s, err := financeToStore(as, fin)
+	if err != nil {
+		log.Warnw("変換に失敗しました。", "url", u, "error", err)
+		return
+	}
+	dir, err := createIndicatorPath(as)
+	if err != nil {
 		log.Warnw("データ保存用フォルダの作成に失敗しました。", "url", u, "error", err)
 		return
 	}
-	fp, err := os.Create(filepath.Join(dir, fmt.Sprintf("%d.json", time.Time(s.Meta.RegularMarketTime).Unix())))
+	fp, err := os.Create(filepath.Join(dir, "day.json"))
 	if err != nil {
 		log.Warnw("データ保存用ファイルの作成に失敗しました。", "url", u, "error", err)
 		return
 	}
 	defer fp.Close()
 	bw := bufio.NewWriterSize(fp, 128*1024)
-	b := bytes.Buffer{}
-	w := io.MultiWriter(bw, &b)
-	enc := json.NewEncoder(w)
+	enc := json.NewEncoder(bw)
 	if err := enc.Encode(&s); err != nil {
 		log.Warnw("データ保存用のJSONエンコードに失敗しました。", "url", u, "error", err)
 		return
